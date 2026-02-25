@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+OBON_VERSION="0.1.0"
+OBON_MIN_PANE_WIDTH="${OBON_MIN_PANE_WIDTH:-80}"
+
+# Internal: tmux socket for testing (e.g., OBON_TMUX_SOCKET=obon-test)
+_TMUX_OPTS=()
+if [[ -n "${OBON_TMUX_SOCKET:-}" ]]; then
+  _TMUX_OPTS=(-L "$OBON_TMUX_SOCKET")
+fi
+readonly _TMUX_OPTS
+
+_tmux() {
+  tmux ${_TMUX_OPTS[@]+"${_TMUX_OPTS[@]}"} "$@"
+}
+
+# --- Helper functions ---
+
+die() {
+  echo "obon: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "obon: warning: $*" >&2
+}
+
+info() {
+  echo "obon: $*"
+}
+
+# --- Precondition checks ---
+
+require_tmux() {
+  command -v tmux >/dev/null 2>&1 || die "tmux is not installed"
+}
+
+require_inside_tmux() {
+  # OBON_SESSION can override session detection (for testing without attached client)
+  [[ -n "${OBON_SESSION:-}" ]] && return 0
+  [[ -n "${TMUX:-}" ]] || die "not inside a tmux session"
+}
+
+require_target_cmd() {
+  [[ -n "${OBON_TARGET_CMD:-}" ]] || die "OBON_TARGET_CMD is not set"
+}
+
+# --- tmux query functions ---
+
+# Find panes running OBON_TARGET_CMD within the given scope.
+# For each hs/ window, returns only the pane with the lowest index.
+# Args: $1 = scope ("session" for current session, "all" for all hs/ sessions)
+# Output: tab-separated lines: session_name\twindow_name\tpane_id
+get_current_session() {
+  if [[ -n "${OBON_SESSION:-}" ]]; then
+    echo "$OBON_SESSION"
+  else
+    _tmux display-message -p '#{session_name}'
+  fi
+}
+
+find_target_panes() {
+  local scope="$1"
+  local -a list_args
+
+  if [[ "$scope" == "session" ]]; then
+    local current_session
+    current_session=$(get_current_session)
+    list_args=(-s -t "$current_session")
+  else
+    list_args=(-a)
+  fi
+
+  _tmux list-panes "${list_args[@]}" \
+    -F '#{session_name}	#{window_name}	#{pane_id}	#{pane_current_command}	#{pane_index}' 2>/dev/null |
+    awk -F'\t' -v target="$OBON_TARGET_CMD" '
+      $1 ~ /^hs\// && $2 ~ /^hs\// && $4 == target {
+        key = $1 "\t" $2
+        if (!(key in seen) || $5 < min_idx[key]) {
+          seen[key] = $1 "\t" $2 "\t" $3
+          min_idx[key] = $5
+        }
+      }
+      END {
+        for (key in seen) print seen[key]
+      }
+    ' | sort
+}
+
+# Check if an obon window exists in the given session
+# Args: $1 = session name
+obon_window_exists() {
+  _tmux list-windows -t "$1" -F '#{window_name}' 2>/dev/null | grep -qxF "obon"
+}
+
+# Check if the obon session exists
+obon_session_exists() {
+  _tmux has-session -t "obon" 2>/dev/null
+}
+
+# --- Width check ---
+
+# Check if pane width after join would be below threshold.
+# Prompts for confirmation if below threshold and -y is not set.
+# Args: $1 = pane_count, $2 = yes_flag ("true" or "false")
+check_pane_width() {
+  local pane_count="$1"
+  local yes_flag="$2"
+
+  [[ "$OBON_MIN_PANE_WIDTH" =~ ^[0-9]+$ ]] || die "OBON_MIN_PANE_WIDTH must be a positive integer"
+
+  local window_width
+  window_width=$(_tmux display-message -p '#{window_width}' 2>/dev/null) || window_width=0
+
+  ((pane_count <= 0)) && return 0
+
+  local predicted_width=$(((window_width - pane_count + 1) / pane_count))
+  if ((predicted_width < OBON_MIN_PANE_WIDTH)); then
+    if [[ "$yes_flag" == "true" ]]; then
+      warn "${pane_count} panes will be joined. Each pane width will be approximately ${predicted_width} columns (threshold: ${OBON_MIN_PANE_WIDTH})."
+      return 0
+    fi
+    echo "obon: ${pane_count} panes will be joined. Each pane width will be approximately ${predicted_width} columns (threshold: ${OBON_MIN_PANE_WIDTH})."
+    printf "Continue? [y/N] "
+    local answer
+    read -r answer
+    case "$answer" in
+      y | Y) return 0 ;;
+      *)
+        info "Aborted."
+        return 1
+        ;;
+    esac
+  fi
+}
+
+# --- Metadata functions ---
+
+save_metadata() {
+  local pane_id="$1" src_session="$2" src_window="$3"
+  _tmux set-option -p -t "$pane_id" @obon_src_session "$src_session" &&
+    _tmux set-option -p -t "$pane_id" @obon_src_window "$src_window"
+}
+
+load_metadata() {
+  local pane_id="$1"
+  local session window
+  session=$(_tmux show-option -p -t "$pane_id" -v @obon_src_session 2>/dev/null) || return 1
+  window=$(_tmux show-option -p -t "$pane_id" -v @obon_src_window 2>/dev/null) || return 1
+  printf '%s\t%s\n' "$session" "$window"
+}
+
+clear_metadata() {
+  local pane_id="$1"
+  _tmux set-option -p -t "$pane_id" -u @obon_src_session 2>/dev/null
+  _tmux set-option -p -t "$pane_id" -u @obon_src_window 2>/dev/null
+}
+
+# --- Subcommand: join ---
+
+cmd_join() {
+  local all_flag=false
+  local yes_flag=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)
+        all_flag=true
+        shift
+        ;;
+      -y | --yes)
+        yes_flag=true
+        shift
+        ;;
+      *) die "join: unknown option '$1'" ;;
+    esac
+  done
+
+  require_tmux
+  require_target_cmd
+
+  if [[ "$all_flag" == "true" ]]; then
+    cmd_join_all "$yes_flag"
+  else
+    cmd_join_default "$yes_flag"
+  fi
+}
+
+cmd_join_default() {
+  local yes_flag="$1"
+
+  require_inside_tmux
+
+  local current_session
+  current_session=$(get_current_session)
+
+  [[ "$current_session" == hs/* ]] || die "join: must be run inside an hs/ session (current: ${current_session})"
+
+  obon_window_exists "$current_session" && die "join: obon window already exists in session '${current_session}'"
+
+  local panes
+  panes=$(find_target_panes "session")
+  [[ -n "$panes" ]] || {
+    info "No target panes found."
+    return 0
+  }
+
+  local -i pane_count=0
+  while IFS= read -r _line; do ((pane_count += 1)); done <<<"$panes"
+
+  check_pane_width "$pane_count" "$yes_flag" || return 0
+
+  local initial_pane_id
+  initial_pane_id=$(_tmux new-window -t "$current_session" -n obon -P -F '#{pane_id}') || die "join: failed to create obon window"
+
+  local pane_name
+  local joined=0
+  trap 'warn "interrupted during join; some panes may be in an inconsistent state"' INT TERM
+
+  while IFS=$'\t' read -r src_session src_window pane_id; do
+    if ! save_metadata "$pane_id" "$src_session" "$src_window"; then
+      warn "failed to save metadata for pane ${pane_id}, skipping"
+      continue
+    fi
+    if ! _tmux join-pane -t "${current_session}:obon" -s "$pane_id" -h; then
+      warn "failed to join pane ${pane_id}, rolling back metadata"
+      clear_metadata "$pane_id"
+      continue
+    fi
+    pane_name="${src_window#hs/}"
+    _tmux select-pane -t "$pane_id" -T "$pane_name"
+    joined=$((joined + 1))
+  done <<<"$panes"
+
+  trap - INT TERM
+
+  _tmux kill-pane -t "$initial_pane_id" 2>/dev/null
+
+  if ((joined == 0)); then
+    warn "no panes were successfully joined"
+    return 0
+  fi
+
+  _tmux select-layout -t "${current_session}:obon" even-horizontal
+  _tmux set-option -w -t "${current_session}:obon" pane-border-status top
+  _tmux set-option -w -t "${current_session}:obon" pane-border-format '#{pane_title}'
+
+  info "Joined ${joined} pane(s) into obon window."
+}
+
+cmd_join_all() {
+  local yes_flag="$1"
+
+  require_inside_tmux
+  obon_session_exists && die "join --all: obon session already exists"
+
+  local hs_sessions
+  hs_sessions=$(_tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^hs/') || true
+  if [[ -n "$hs_sessions" ]]; then
+    while IFS= read -r sess; do
+      obon_window_exists "$sess" && die "join --all: obon window already exists in session '${sess}'"
+    done <<<"$hs_sessions"
+  fi
+
+  local panes
+  panes=$(find_target_panes "all")
+  [[ -n "$panes" ]] || {
+    info "No target panes found."
+    return 0
+  }
+
+  local -i pane_count=0
+  while IFS= read -r _line; do ((pane_count += 1)); done <<<"$panes"
+
+  check_pane_width "$pane_count" "$yes_flag" || return 0
+
+  _tmux new-session -d -s obon -n obon -c "$HOME" || die "join --all: failed to create obon session"
+  local initial_pane_id
+  initial_pane_id=$(_tmux list-panes -t "obon:obon" -F '#{pane_id}' | head -1)
+  [[ -n "$initial_pane_id" ]] || die "join --all: failed to get initial pane"
+
+  local pane_name
+  local joined=0
+  trap 'warn "interrupted during join; some panes may be in an inconsistent state"' INT TERM
+
+  while IFS=$'\t' read -r src_session src_window pane_id; do
+    if ! save_metadata "$pane_id" "$src_session" "$src_window"; then
+      warn "failed to save metadata for pane ${pane_id}, skipping"
+      continue
+    fi
+    if ! _tmux join-pane -t "obon:obon" -s "$pane_id" -h; then
+      warn "failed to join pane ${pane_id}, rolling back metadata"
+      clear_metadata "$pane_id"
+      continue
+    fi
+    pane_name="${src_session#hs/}/${src_window#hs/}"
+    _tmux select-pane -t "$pane_id" -T "$pane_name"
+    joined=$((joined + 1))
+  done <<<"$panes"
+
+  trap - INT TERM
+
+  _tmux kill-pane -t "$initial_pane_id" 2>/dev/null
+
+  if ((joined == 0)); then
+    warn "no panes were successfully joined"
+    return 0
+  fi
+
+  _tmux select-layout -t "obon:obon" even-horizontal
+  _tmux set-option -w -t "obon:obon" pane-border-status top
+  _tmux set-option -w -t "obon:obon" pane-border-format '#{pane_title}'
+
+  info "Joined ${joined} pane(s) into obon session."
+}
+
+# --- Subcommand: break ---
+
+cmd_break() {
+  local all_flag=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)
+        all_flag=true
+        shift
+        ;;
+      *) die "break: unknown option '$1'" ;;
+    esac
+  done
+
+  require_tmux
+
+  if [[ "$all_flag" == "true" ]]; then
+    cmd_break_all
+  else
+    cmd_break_default
+  fi
+}
+
+restore_panes_from() {
+  local target="$1"
+  local restored=0
+  _restored_count=0
+
+  local pane_ids
+  pane_ids=$(_tmux list-panes -t "$target" -F '#{pane_id}' 2>/dev/null) || return 1
+
+  local metadata src_session src_window pane_path new_initial_pane
+
+  while IFS= read -r pane_id; do
+    [[ -n "$pane_id" ]] || continue
+
+    if ! metadata=$(load_metadata "$pane_id"); then
+      warn "no metadata for pane ${pane_id}, skipping"
+      continue
+    fi
+
+    IFS=$'\t' read -r src_session src_window <<<"$metadata"
+
+    if ! _tmux has-session -t "$src_session" 2>/dev/null; then
+      pane_path=$(_tmux display-message -t "$pane_id" -p '#{pane_current_path}')
+      _tmux new-session -d -s "$src_session" -c "$pane_path"
+    fi
+
+    if ! _tmux list-windows -t "$src_session" -F '#{window_name}' 2>/dev/null | grep -qxF "$src_window"; then
+      pane_path=$(_tmux display-message -t "$pane_id" -p '#{pane_current_path}')
+      _tmux new-window -t "$src_session" -n "$src_window" -c "$pane_path"
+      new_initial_pane=$(_tmux list-panes -t "${src_session}:${src_window}" -F '#{pane_id}' | head -1)
+      if ! _tmux join-pane -t "${src_session}:${src_window}" -s "$pane_id"; then
+        warn "failed to restore pane ${pane_id}, rolling back"
+        _tmux kill-window -t "${src_session}:${src_window}" 2>/dev/null
+        continue
+      fi
+      _tmux kill-pane -t "$new_initial_pane" 2>/dev/null
+    else
+      if ! _tmux join-pane -t "${src_session}:${src_window}" -s "$pane_id"; then
+        warn "failed to restore pane ${pane_id}, skipping"
+        continue
+      fi
+    fi
+
+    clear_metadata "$pane_id"
+    restored=$((restored + 1))
+  done <<<"$pane_ids"
+
+  _restored_count=$restored
+}
+
+cmd_break_default() {
+  local hs_sessions
+  hs_sessions=$(_tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^hs/') || true
+
+  local found_any=false
+  local total_restored=0
+
+  trap 'warn "interrupted during break; some panes may be in an inconsistent state"' INT TERM
+
+  if [[ -n "$hs_sessions" ]]; then
+    while IFS= read -r sess; do
+      if obon_window_exists "$sess"; then
+        found_any=true
+        restore_panes_from "${sess}:obon" || true
+        total_restored=$((total_restored + _restored_count))
+      fi
+    done <<<"$hs_sessions"
+  fi
+
+  trap - INT TERM
+
+  [[ "$found_any" == "true" ]] || die "break: no obon window found in any hs/ session"
+  info "Restored ${total_restored} pane(s) to their original locations."
+}
+
+cmd_break_all() {
+  obon_session_exists || die "break --all: obon session does not exist"
+
+  trap 'warn "interrupted during break; some panes may be in an inconsistent state"' INT TERM
+
+  restore_panes_from "obon:obon"
+
+  trap - INT TERM
+
+  info "Restored ${_restored_count} pane(s) to their original locations."
+}
+
+# --- Usage ---
+
+usage() {
+  cat <<'EOF'
+Usage: obon <command> [options]
+
+Commands:
+  join [--all] [-y|--yes]   Aggregate panes running the target command into an obon window
+  break [--all]             Restore panes from the obon window to their original locations
+
+Options:
+  -h, --help      Show this help message
+  -v, --version   Show version
+
+Environment variables:
+  OBON_TARGET_CMD       (required) Command name to match against pane_current_command
+  OBON_MIN_PANE_WIDTH   (optional) Minimum pane width in columns (default: 80)
+EOF
+}
+
+# --- Main dispatch ---
+
+case "${1:-}" in
+  join)
+    shift
+    cmd_join "$@"
+    ;;
+  break)
+    shift
+    cmd_break "$@"
+    ;;
+  -v | --version)
+    echo "obon $OBON_VERSION"
+    ;;
+  -h | --help)
+    usage
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    echo "obon: unknown command '$1'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
