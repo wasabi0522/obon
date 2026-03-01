@@ -8,8 +8,8 @@ if [[ -d "$BATS_TEST_DIRNAME/test_libs/bats-support" ]]; then
   load "$BATS_TEST_DIRNAME/test_libs/bats-support/load"
   load "$BATS_TEST_DIRNAME/test_libs/bats-assert/load"
 else
-  load "bats-support/load"
-  load "bats-assert/load"
+  bats_load_library bats-support
+  bats_load_library bats-assert
 fi
 
 # Wait until pane_current_command matches the expected command.
