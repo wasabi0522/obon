@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Publish GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false 2>/dev/null || \
+            gh release create "${{ github.ref_name }}" --generate-notes
+
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+          SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | cut -d' ' -f1)
+
+          cat > obon.rb <<FORMULA
+          class Obon < Formula
+            desc "Gather and restore tmux panes across sessions"
+            homepage "https://github.com/wasabi0522/obon"
+            url "${TARBALL_URL}"
+            sha256 "${SHA256}"
+            license "MIT"
+
+            depends_on "tmux"
+
+            def install
+              bin.install "obon"
+            end
+
+            test do
+              system bin/"obon", "--version"
+            end
+          end
+          FORMULA
+          sed -i 's/^          //' obon.rb
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/wasabi0522/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp obon.rb tap/Formula/obon.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/obon.rb
+          git diff --cached --quiet || {
+            git commit -m "Update obon formula to ${VERSION}"
+            git push
+          }
