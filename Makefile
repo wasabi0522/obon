@@ -1,6 +1,6 @@
 BASH_FILES := obon test/setup.sh test/test_helper/common.bash
 
-BATS_LIB_PATH := $(CURDIR)/test/test_libs
+BATS_LIB_PATH ?= $(CURDIR)/test/test_libs
 export BATS_LIB_PATH
 
 .PHONY: test lint fmt setup clean
