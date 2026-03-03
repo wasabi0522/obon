@@ -3,6 +3,9 @@
 ## [v0.0.4](https://github.com/wasabi0522/obon/compare/v0.0.3...v0.0.4) - 2026-03-03
 - Fix pane border to show branch name using pane option by @wasabi0522 in https://github.com/wasabi0522/obon/pull/13
 
+## [v0.0.4](https://github.com/wasabi0522/obon/compare/v0.0.3...v0.0.4) - 2026-03-03
+- Fix pane border to show branch name using pane option by @wasabi0522 in https://github.com/wasabi0522/obon/pull/13
+
 ## [v0.0.3](https://github.com/wasabi0522/obon/compare/v0.0.2...v0.0.3) - 2026-03-03
 - Add .hashi.yaml for worktree configuration by @wasabi0522 in https://github.com/wasabi0522/obon/pull/9
 - Align tagpr workflow with hashi configuration by @wasabi0522 in https://github.com/wasabi0522/obon/pull/11
