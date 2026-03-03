@@ -252,12 +252,6 @@ join_panes_into() {
     joined=$((joined + 1))
   done <<<"$panes"
 
-  if ((joined > 0)); then
-    _tmux select-layout -t "$obon_target" even-horizontal
-    _tmux set-option -w -t "$obon_target" pane-border-status top
-    _tmux set-option -w -t "$obon_target" pane-border-format '#{pane_title}'
-  fi
-
   echo "$joined"
 }
 
@@ -318,6 +312,10 @@ _complete_join() {
     warn "no panes were successfully joined"
     return 0
   fi
+
+  _tmux select-layout -t "$obon_target" even-horizontal
+  _tmux set-option -w -t "$obon_target" pane-border-status top
+  _tmux set-option -w -t "$obon_target" pane-border-format '#{pane_title}'
 
   info "Joined ${joined} pane(s) into ${OBON_NAME} ${label}."
 }

@@ -71,6 +71,42 @@ teardown() {
   assert_output --partial "obon"
 }
 
+@test "join: applies even-horizontal layout" {
+  tmux -L "$OBON_TMUX_SOCKET" new-window -t "hs/org/repo" -n "hs/feature/a"
+  tmux -L "$OBON_TMUX_SOCKET" send-keys -t "hs/org/repo:hs/feature/a" "sleep 600" Enter
+  wait_for_cmd "$OBON_TMUX_SOCKET" "hs/org/repo:hs/feature/a" "sleep"
+
+  tmux -L "$OBON_TMUX_SOCKET" new-window -t "hs/org/repo" -n "hs/feature/b"
+  tmux -L "$OBON_TMUX_SOCKET" send-keys -t "hs/org/repo:hs/feature/b" "sleep 600" Enter
+  wait_for_cmd "$OBON_TMUX_SOCKET" "hs/org/repo:hs/feature/b" "sleep"
+
+  run "$OBON_BIN" join -y
+  assert_success
+
+  # All panes should have approximately equal width (even-horizontal layout)
+  # A difference of 1 column is expected due to the pane separator
+  run tmux -L "$OBON_TMUX_SOCKET" list-panes -t "hs/org/repo:obon" -F '#{pane_width}'
+  local widths=($output)
+  local diff=$(( widths[0] - widths[1] ))
+  (( diff < 0 )) && diff=$(( -diff ))
+  (( diff <= 1 ))
+}
+
+@test "join: sets pane-border-status and pane-border-format" {
+  tmux -L "$OBON_TMUX_SOCKET" new-window -t "hs/org/repo" -n "hs/develop"
+  tmux -L "$OBON_TMUX_SOCKET" send-keys -t "hs/org/repo:hs/develop" "sleep 600" Enter
+  wait_for_cmd "$OBON_TMUX_SOCKET" "hs/org/repo:hs/develop" "sleep"
+
+  run "$OBON_BIN" join -y
+  assert_success
+
+  run tmux -L "$OBON_TMUX_SOCKET" show-option -w -t "hs/org/repo:obon" pane-border-status
+  assert_output --partial "top"
+
+  run tmux -L "$OBON_TMUX_SOCKET" show-option -w -t "hs/org/repo:obon" pane-border-format
+  assert_output --partial '#{pane_title}'
+}
+
 @test "join: pane titles are set correctly" {
   tmux -L "$OBON_TMUX_SOCKET" new-window -t "hs/org/repo" -n "hs/develop"
   tmux -L "$OBON_TMUX_SOCKET" send-keys -t "hs/org/repo:hs/develop" "sleep 600" Enter
