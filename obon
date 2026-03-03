@@ -197,6 +197,7 @@ load_metadata() {
 clear_metadata() {
   local pane_id="$1"
   _tmux set-option -p -t "$pane_id" -u @obon_src 2>/dev/null
+  _tmux set-option -p -t "$pane_id" -u @obon_name 2>/dev/null
 }
 
 # --- Join helpers ---
@@ -248,7 +249,7 @@ join_panes_into() {
     else
       pane_name="${src_window#hs/}"
     fi
-    _tmux select-pane -t "$pane_id" -T "$pane_name"
+    _tmux set-option -p -t "$pane_id" @obon_name "$pane_name"
     joined=$((joined + 1))
   done <<<"$panes"
 
@@ -315,7 +316,7 @@ _complete_join() {
 
   _tmux select-layout -t "$obon_target" even-horizontal
   _tmux set-option -w -t "$obon_target" pane-border-status top
-  _tmux set-option -w -t "$obon_target" pane-border-format '#{pane_title}'
+  _tmux set-option -w -t "$obon_target" pane-border-format '#{@obon_name}'
 
   info "Joined ${joined} pane(s) into ${OBON_NAME} ${label}."
 }

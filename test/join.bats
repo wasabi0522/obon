@@ -104,10 +104,10 @@ teardown() {
   assert_output --partial "top"
 
   run tmux -L "$OBON_TMUX_SOCKET" show-option -w -t "hs/org/repo:obon" pane-border-format
-  assert_output --partial '#{pane_title}'
+  assert_output --partial '#{@obon_name}'
 }
 
-@test "join: pane titles are set correctly" {
+@test "join: pane names are set correctly" {
   tmux -L "$OBON_TMUX_SOCKET" new-window -t "hs/org/repo" -n "hs/develop"
   tmux -L "$OBON_TMUX_SOCKET" send-keys -t "hs/org/repo:hs/develop" "sleep 600" Enter
   wait_for_cmd "$OBON_TMUX_SOCKET" "hs/org/repo:hs/develop" "sleep"
@@ -116,7 +116,7 @@ teardown() {
   assert_success
   assert_output --partial "Joined 1 pane(s)"
 
-  run tmux -L "$OBON_TMUX_SOCKET" list-panes -t "hs/org/repo:obon" -F '#{pane_title}'
+  run tmux -L "$OBON_TMUX_SOCKET" list-panes -t "hs/org/repo:obon" -F '#{@obon_name}'
   assert_output --partial "develop"
 }
 
