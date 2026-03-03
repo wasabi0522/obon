@@ -7,9 +7,9 @@ hooks:
   copy_files:
     - CLAUDE.md
     - .claude
+    - test/test_libs
 
   # Shell commands to run after worktree creation (executed sequentially).
   # Working directory is set to the new worktree path.
   post_new:
-    - make setup
     - claude
